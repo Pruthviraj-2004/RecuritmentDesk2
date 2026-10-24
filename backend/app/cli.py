@@ -107,6 +107,24 @@ def purge_demo_candidates_cmd(confirm: bool) -> int:
     return 0
 
 
+def send_digest_now() -> int:
+    """Run the scheduled-email check once (what the scheduler does every 10 minutes) and print the outcome per organization."""
+    from sqlalchemy import select
+
+    from app.db.session import session_scope
+    from app.models.ops import AppSetting
+    from app.services.app_settings import DigestSettings
+    from app.services.delivery.digest import digest_org
+
+    with session_scope() as db:
+        rows = list(db.scalars(select(AppSetting).where(AppSetting.section == "digest")))
+        if not rows:
+            print("Scheduled email is not configured (Settings > Scheduled email).")
+        for row in rows:
+            print(f"{row.organization_id}: {digest_org(db, row.organization_id, DigestSettings.model_validate(row.value))}")
+    return 0
+
+
 def check_config() -> int:
     from app.core.config import get_settings
 
@@ -145,9 +163,12 @@ def main() -> int:
     dc.add_argument("--org")
     pdc = sub.add_parser("purge-demo-candidates")
     pdc.add_argument("--yes", action="store_true")
+    sub.add_parser("send-digest-now")
     sub.add_parser("check-config")
     sub.add_parser("generate-keys")
     args = p.parse_args()
+    if args.cmd == "send-digest-now":
+        return send_digest_now()
     if args.cmd == "create-admin":
         return create_admin(args.email, args.name, args.org)
     if args.cmd == "seed-demo-candidates":
