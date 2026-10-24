@@ -3,9 +3,12 @@ from __future__ import annotations
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
@@ -64,7 +67,26 @@ def create_app() -> FastAPI:
 
     install_exception_handlers(app)
     app.include_router(api_router)
+    _serve_frontend(app, s.static_dir)
     return app
+
+
+def _serve_frontend(app: FastAPI, static_dir: str) -> None:
+    """Serve the built SPA from the same origin as the API (cookies/CSRF then need no CORS). Off unless STATIC_DIR is set."""
+    root = Path(static_dir).resolve() if static_dir else None
+    if not root or not (root / "index.html").is_file():
+        return
+    if (root / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=root / "assets"), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(404, "Not found")
+        f = (root / path).resolve()
+        if path and f.is_file() and root in f.parents:
+            return FileResponse(f)
+        return FileResponse(root / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 app = create_app()

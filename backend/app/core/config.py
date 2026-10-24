@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     storage_backend: str = "local"
     storage_path: str = "./data/storage"
+    static_dir: str = ""  # built frontend served by the API itself (single-container deployments such as Render)
 
     initial_admin_email: str = ""
     initial_admin_password: str = ""
