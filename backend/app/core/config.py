@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     storage_backend: str = "local"
     storage_path: str = "./data/storage"
+    tick_secret: str = ""  # enables POST /api/v1/internal/tick (run the scheduler from an external cron); >= 24 random chars
     static_dir: str = ""  # built frontend served by the API itself (single-container deployments such as Render)
 
     initial_admin_email: str = ""
@@ -91,6 +92,8 @@ class Settings(BaseSettings):
             problems.append("SECRET_KEY must be set to a random value of at least 32 characters")
         if not self.encryption_key:
             problems.append("ENCRYPTION_KEY must be set (generate with scripts/generate-keys.ps1)")
+        if self.tick_secret and len(self.tick_secret) < 24:
+            problems.append("TICK_SECRET must be at least 24 characters")
         if self.is_production and not self.session_cookie_secure:
             problems.append("SESSION_COOKIE_SECURE must be true in production")
         if self.is_production and self.session_cookie_samesite.lower() == "none":

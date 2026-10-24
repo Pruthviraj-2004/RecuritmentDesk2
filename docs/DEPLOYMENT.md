@@ -34,3 +34,13 @@ Backups: `scripts\backup-db.ps1`, `scripts\restore-db.ps1 -File backups\<file>.d
 | Retention / recovery | `cleanup` runs every 6 h. Restore = restore the DB dump, restore `ENCRYPTION_KEY`, run migrations, run a full re-import per account (idempotent). |
 
 Do not deploy to live infrastructure without your own credentials and approval; nothing in this repository does so.
+
+## Hosting without a worker (Render free plan)
+
+Celery needs Redis plus an always-running worker and beat. If your host sleeps idle services (Render free), run the scheduler from outside instead:
+
+1. Set `TICK_SECRET` (24+ random characters) on the service and leave `REDIS_URL` empty (background work then runs inline).
+2. Create a free job at cron-job.org (or a GitHub Actions `schedule:` workflow) that calls `POST https://<your-host>/api/v1/internal/tick` every 10-15 minutes with the header `Authorization: Bearer <TICK_SECRET>`.
+3. Each call wakes the service and, in a background thread, syncs due accounts, extracts waiting mail, resumes stuck jobs, sends due scheduled emails and does housekeeping. Overlapping calls are ignored; the endpoint is disabled (404) when `TICK_SECRET` is empty.
+
+Scheduled emails are sent at the first tick after their time, so a 09:00 email goes out at 09:00-09:15 with a 15 minute interval.

@@ -528,3 +528,43 @@ def test_schedule_test_button_sends_a_marked_email_without_moving_the_real_sched
 
     run = _runner(owner[1].id)
     assert run(DigestSchedule(id="t1", name="Delta", recipients="a@example.com")) == "accepted_by_gmail"  # the real first email is unaffected by tests
+
+
+# ---------------------------------------------------------------- external tick (hosting without a worker)
+def test_tick_endpoint_is_disabled_without_secret_checks_token_and_runs_a_pass(client, api, db, connected_account, mailbox, monkeypatch):
+    from app.core.config import get_settings
+    from app.services import tick
+
+    monkeypatch.setattr(get_settings(), "tick_secret", "")
+    assert client.post(f"{API}/internal/tick").status_code == 404  # disabled unless configured
+    monkeypatch.setattr(get_settings(), "tick_secret", "s" * 32)
+    assert client.post(f"{API}/internal/tick").status_code == 401
+    assert client.post(f"{API}/internal/tick", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    monkeypatch.setattr(tick, "start_in_background", lambda: True)  # the thread itself is covered below
+    ok = client.post(f"{API}/internal/tick", headers={"Authorization": "Bearer " + "s" * 32})
+    assert ok.status_code == 202 and ok.json()["started"] is True
+    monkeypatch.setattr(tick, "start_in_background", lambda: False)
+    busy = client.get(f"{API}/internal/tick", headers={"Authorization": "Bearer " + "s" * 32})
+    assert busy.status_code == 200 and busy.json()["already_running"] is True
+
+
+def test_tick_pass_runs_every_step_and_sends_due_scheduled_emails(api, db, connected_account, mailbox, owner):
+    from app.services import tick
+
+    connected_account("sender@gmail.com", default=True)
+    mk(api)
+    sched = {"id": "x1", "name": "Delta", "enabled": True, "recipients": "a@example.com", "mode": "delta", "frequency": "hours", "interval_hours": 3}
+    assert api.put(f"{API}/settings/digest", json={"values": {"schedules": [sched]}}).status_code == 200
+    box = mailbox.for_email("sender@gmail.com")
+    res = tick.run_tick()
+    assert set(res) >= {"sync_jobs_created", "pending_processed", "stuck_resumed", "scheduled_emails_sent"} and not any(str(v).startswith("error") for v in res.values())
+    assert res["scheduled_emails_sent"] == 1 and len(box.sent) == 1
+    assert tick.run_tick()["scheduled_emails_sent"] == 0 and len(box.sent) == 1  # nothing due the second time
+    assert tick.start_in_background() is True
+    for _ in range(100):
+        if not tick.status()["running"]:
+            break
+        import time
+
+        time.sleep(0.1)
+    assert tick.status()["last_result"] is not None
