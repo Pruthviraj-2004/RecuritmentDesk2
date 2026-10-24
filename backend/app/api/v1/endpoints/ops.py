@@ -211,6 +211,22 @@ def put_settings_section(section: str, body: SettingsPatch, ctx: Ctx = admin):
     return saved.model_dump()
 
 
+@router.post("/settings/digest/{schedule_id}/test")
+def test_scheduled_email(schedule_id: str, ctx: Ctx = admin):
+    """Send a saved schedule's email right now (to check recipients, sender and the file); does not affect the real timetable."""
+    from app.services.app_settings import DigestSettings
+    from app.services.delivery.digest import send_test
+
+    sched = next((s for s in DigestSettings.model_validate(get_section(ctx.db, ctx.org_id, "digest").model_dump()).schedules if s.id == schedule_id), None)
+    if sched is None:
+        raise NotFoundError("Schedule not found. Save your changes first, then test it.")
+    result = send_test(ctx.db, ctx.org_id, sched)
+    audit.record(ctx.db, org_id=ctx.org_id, user_id=ctx.user_id, action="digest.test_sent", entity_type="settings", entity_id=schedule_id,
+                 metadata={"status": result["status"], "recipients": len(result["recipients"])})
+    ctx.db.commit()
+    return result
+
+
 @router.get("/settings-meta/ai")
 def ai_status(ctx: Ctx = viewer, check: bool = False):
     """Provider status. Secrets are never returned; `check=true` performs a live provider health check."""

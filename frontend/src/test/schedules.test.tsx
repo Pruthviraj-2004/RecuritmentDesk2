@@ -38,3 +38,16 @@ describe("scheduled emails", () => {
     await waitFor(() => expect((calls.find((c) => c.method === "PUT")!.body as { values: { schedules: unknown[] } }).values.schedules).toHaveLength(0));
   });
 });
+
+describe("test button", () => {
+  it("sends a test for a saved schedule and is disabled while there are unsaved changes", async () => {
+    const calls = mockApi({ "GET /settings/digest": { schedules: [SCHED] }, "POST /settings/digest/s1/test": { status: "accepted_by_gmail", count: 3, sample: false, sender: "me@gmail.com", recipients: ["a@example.com"] } });
+    renderApp(<SchedulesSection />);
+    const btn = await screen.findByRole("button", { name: "Send test for Delta" });
+    await userEvent.click(btn);
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/settings/digest/s1/test")).toBe(true));
+    expect(await screen.findByText(/Test email sent from me@gmail.com to a@example.com with 3 requirements/)).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Name (used as the email subject)"), "x");
+    expect(screen.getByRole("button", { name: "Send test for Deltax" })).toBeDisabled();
+  });
+});

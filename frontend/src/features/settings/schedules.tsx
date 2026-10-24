@@ -1,5 +1,6 @@
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Send, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { useAuth } from "@/app/auth";
 import { ErrorState, LoadingRows } from "@/components/common/common";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,15 @@ export function SchedulesSection() {
     fn: (schedules) => api.put("/settings/digest", { values: { schedules: schedules.map((s) => ({ ...s, recipients: recipientText(s.recipients), days: Number(s.days), interval_hours: Number(s.interval_hours) })) } }),
     invalidate: [["settings", "digest"], ["audit"]], success: "Scheduled emails saved",
   });
+  const test = useAction<string, { status: string; count: number; sample: boolean; sender: string; recipients: string[] }>({
+    fn: (id) => api.post(`/settings/digest/${id}/test`), invalidate: [["deliveries"]], success: null,
+    onDone: (r) => {
+      const what = `${r.count} requirement${r.count === 1 ? "" : "s"}${r.sample ? " (sample: nothing new right now)" : ""}`;
+      if (r.status === "accepted_by_gmail") toast.success(`Test email sent from ${r.sender} to ${r.recipients.join(", ")} with ${what}.`);
+      else if (r.status === "uncertain") toast.warning("Delivery outcome is uncertain. Check the Sent folder of the sender account.", { duration: 10000 });
+      else toast.error(`The test email did not go out (${r.status}). See Exports for details.`);
+    },
+  });
   if (q.isLoading) return <LoadingRows rows={4} />;
   if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const admin = can("admin");
@@ -44,7 +54,11 @@ export function SchedulesSection() {
           <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
             <div><CardTitle className="text-base">{s.name || "Scheduled email"}</CardTitle>
               <CardDescription>{s.mode === "delta" ? "Only new or changed requirements" : s.mode === "all" ? "All active requirements" : `New or updated in the last ${s.days} days`} · {s.frequency === "hours" ? `every ${s.interval_hours} hour(s)` : `daily at ${s.time_of_day} (${s.timezone})`}</CardDescription></div>
+            <div className="flex gap-2">
+            <Button size="sm" variant="outline" disabled={!admin || dirty} title={dirty ? "Save your changes first" : "Send this schedule's email now to the recipients"} aria-label={`Send test for ${s.name}`}
+              loading={test.isPending && test.variables === s.id} onClick={() => test.mutate(s.id)}><Send /> Send test</Button>
             <Button size="sm" variant="outline" disabled={!admin} aria-label={`Delete ${s.name}`} onClick={() => { setItems((cur) => cur.filter((_, j) => j !== i)); setDirty(true); }}><Trash2 /> Delete</Button>
+            </div>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
             <label className="flex items-center gap-2 text-sm sm:col-span-2"><Checkbox disabled={!admin} checked={s.enabled} onChange={(e) => set(i, { enabled: e.target.checked })} /> This schedule is on</label>
@@ -60,7 +74,7 @@ export function SchedulesSection() {
               ? <Field label="Every (hours)" htmlFor={`h-${s.id}`} hint="1–24"><Input id={`h-${s.id}`} type="number" min={1} max={24} disabled={!admin} value={s.interval_hours} onChange={(e) => set(i, { interval_hours: Number(e.target.value) })} /></Field>
               : <div className="grid grid-cols-2 gap-3">
                 <Field label="Time of day" htmlFor={`t-${s.id}`}><Input id={`t-${s.id}`} type="time" disabled={!admin} value={s.time_of_day} onChange={(e) => set(i, { time_of_day: e.target.value })} /></Field>
-                <Field label="Timezone" htmlFor={`z-${s.id}`} hint="e.g. Asia/Kolkata"><Input id={`z-${s.id}`} disabled={!admin} value={s.timezone} onChange={(e) => set(i, { timezone: e.target.value })} /></Field></div>}
+                <Field label="Timezone" htmlFor={`z-${s.id}`} hint="IANA name, e.g. America/Chicago (US Central, incl. Houston, daylight saving handled) or Asia/Kolkata"><Input id={`z-${s.id}`} disabled={!admin} value={s.timezone} onChange={(e) => set(i, { timezone: e.target.value })} /></Field></div>}
             <Field label="Send from (connected account)" htmlFor={`s-${s.id}`} hint="Leave blank to use the default sender; the account needs send access"><Input id={`s-${s.id}`} disabled={!admin} value={s.sender_email} onChange={(e) => set(i, { sender_email: e.target.value })} /></Field>
           </CardContent>
         </Card>))}

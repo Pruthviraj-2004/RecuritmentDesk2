@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import ValidationFailure
 from app.core.logging import get_logger
 from app.db.types import utcnow
 from app.models.email import EmailAccount
@@ -84,6 +85,14 @@ def digest_schedule(db: Session, org_id: uuid.UUID, sched: DigestSchedule, now: 
     acct = _sender(db, org_id, sched.sender_email)
     if acct is None:
         return "no_sender"
+    ids, scope = _select(db, org_id, sched, last_ok, now)
+    if not ids:
+        return "nothing_new"
+    return _send(db, org_id, sched, acct, ids, scope, key, now)
+
+
+def _select(db: Session, org_id: uuid.UUID, sched: DigestSchedule, last_ok: EmailDelivery | None, now: datetime) -> tuple[list[str], str]:
+    """Requirement ids this schedule would send now, and a phrase describing them."""
     stmt = select(JobRequirement.id).where(JobRequirement.organization_id == org_id, JobRequirement.lifecycle_status == LifecycleStatus.ACTIVE,
                                            JobRequirement.review_status != ReviewStatus.REJECTED)
     if sched.mode == "delta":
@@ -95,9 +104,11 @@ def digest_schedule(db: Session, org_id: uuid.UUID, sched: DigestSchedule, now: 
         scope = f"new or updated in the last {sched.days} days"
     else:
         scope = "currently active"
-    ids = [str(i) for i in db.scalars(stmt)]
-    if not ids:
-        return "nothing_new"
+    return [str(i) for i in db.scalars(stmt)], scope
+
+
+def _send(db: Session, org_id: uuid.UUID, sched: DigestSchedule, acct: EmailAccount, ids: list[str], scope: str, key: str, now: datetime,
+          test: bool = False) -> str:
     user_id, acct_id = acct.connected_by_user_id, acct.id
     recipients = validate_recipients(sched.recipients)
     job = jobs.create_job(db, org_id=org_id, job_type="export", payload={}, user_id=user_id)
@@ -113,10 +124,39 @@ def digest_schedule(db: Session, org_id: uuid.UUID, sched: DigestSchedule, now: 
         return "export_failed"
     when = f"every {sched.interval_hours} hours" if sched.frequency == "hours" else f"daily at {sched.time_of_day} {sched.timezone}"
     body = f"Hello,\n\nAttached are the {len(ids)} requirements {scope} (scheduled email \"{sched.name}\", {when}).\n\nRegards"
+    subject = f"{sched.name} ({len(ids)})"
+    if test:
+        subject, body = "[TEST] " + subject, "This is a test of the scheduled email. It does not affect the real schedule.\n\n" + body
     d, _ = create_delivery(db, org_id=org_id, user_id=user_id, export_id=export_id, sender_account_id=acct_id, to=recipients, cc=[],
-                           subject=f"{sched.name} ({len(ids)})", body=body, confirmed=True, idempotency_key=key)
+                           subject=subject, body=body, confirmed=True, idempotency_key=key)
     db.commit()
     return send_delivery(db, d.id).status
+
+
+def send_test(db: Session, org_id: uuid.UUID, sched: DigestSchedule) -> dict:
+    """Send this schedule's email right now, ignoring the timetable, so it can be checked end to end.
+
+    It picks what the schedule would send next; if that is empty it sends up to 5 recent active requirements instead so there is always a
+    file to look at. It never moves the schedule's 'since last email' marker (test emails use their own key prefix).
+    """
+    if not sched.recipients:
+        raise ValidationFailure("Add at least one recipient first")
+    acct = _sender(db, org_id, sched.sender_email)
+    if acct is None:
+        raise ValidationFailure("No connected Gmail account with send access was found" + (f" for {sched.sender_email}" if sched.sender_email else ""), code="no_sender")
+    now = utcnow()
+    last_ok = db.scalar(_deliveries(org_id, sched).where(EmailDelivery.status.in_(_SENT)).order_by(EmailDelivery.created_at.desc()))
+    ids, scope = _select(db, org_id, sched, last_ok, now)
+    sample = False
+    if not ids:
+        ids = [str(i) for i in db.scalars(select(JobRequirement.id).where(
+            JobRequirement.organization_id == org_id, JobRequirement.lifecycle_status == LifecycleStatus.ACTIVE,
+            JobRequirement.review_status != ReviewStatus.REJECTED).order_by(JobRequirement.updated_at.desc()).limit(5))]
+        scope, sample = "most recently updated (nothing is new right now, so this is a sample)", True
+    if not ids:
+        raise ValidationFailure("There are no active requirements to send yet", code="nothing_to_send")
+    status = _send(db, org_id, sched, acct, ids, scope, f"digesttest:{org_id}:{sched.id}:{uuid.uuid4().hex[:10]}", now, test=True)
+    return {"status": status, "count": len(ids), "sample": sample, "sender": acct.email_address, "recipients": sched.recipients}
 
 
 def run_due_digests(db: Session) -> int:

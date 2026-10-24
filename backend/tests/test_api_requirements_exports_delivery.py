@@ -505,3 +505,26 @@ def test_daily_all_and_last_days_schedules(api, db, connected_account, mailbox, 
     wb = load_workbook(io.BytesIO(list(message_from_bytes(box.sent[1], policy=policy.default).iter_attachments())[0].get_payload(decode=True)))
     text = str([c.value for row in wb.worksheets[0].iter_rows() for c in row])
     assert "Fresh Role" in text and "Data Engineer" not in text
+
+
+def test_schedule_test_button_sends_a_marked_email_without_moving_the_real_schedule(api, db, connected_account, mailbox, owner):
+    from email import message_from_bytes, policy
+
+    connected_account("sender@gmail.com", default=True)
+    box = mailbox.for_email("sender@gmail.com")
+    sched = {"id": "t1", "name": "Delta", "enabled": True, "recipients": "a@example.com", "mode": "delta", "frequency": "hours", "interval_hours": 3}
+    assert api.post(f"{API}/settings/digest/t1/test").status_code == 404  # not saved yet
+    assert api.put(f"{API}/settings/digest", json={"values": {"schedules": [sched]}}).status_code == 200
+    r = api.post(f"{API}/settings/digest/t1/test")
+    assert r.status_code == 422 and r.json()["error"]["code"] == "nothing_to_send"  # no requirements at all
+    mk(api)
+    r = api.post(f"{API}/settings/digest/t1/test")
+    assert r.status_code == 200 and r.json()["status"] == "accepted_by_gmail" and r.json()["count"] == 1 and r.json()["sample"] is False
+    msg = message_from_bytes(box.sent[0], policy=policy.default)
+    assert msg["Subject"] == "[TEST] Delta (1)" and "test of the scheduled email" in msg.get_body(("plain",)).get_content()
+    again = api.post(f"{API}/settings/digest/t1/test").json()  # a second test works and, with nothing new... still sends the same changes
+    assert again["status"] == "accepted_by_gmail" and len(box.sent) == 2
+    from app.services.app_settings import DigestSchedule
+
+    run = _runner(owner[1].id)
+    assert run(DigestSchedule(id="t1", name="Delta", recipients="a@example.com")) == "accepted_by_gmail"  # the real first email is unaffected by tests
