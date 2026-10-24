@@ -407,47 +407,101 @@ def test_approving_clears_automatic_warnings(api, db):
 
 
 
-# ---------------------------------------------------------------- scheduled digest
-def test_scheduled_digest_sends_only_new_changes_and_respects_interval(api, db, connected_account, mailbox, owner):
+# ---------------------------------------------------------------- scheduled emails (multiple schedules)
+def _runner(org_id):
+    from app.db.session import session_factory
+    from app.services.delivery.digest import digest_schedule
+
+    def run(sched, now=None):
+        with session_factory()() as sess:  # a fresh plain session per run, like the worker's
+            return digest_schedule(sess, org_id, sched, now)
+
+    return run
+
+
+def _backdate(hours_ago_delivery=None, hours_ago_reqs=None):
+    from app.db.session import session_factory
+    from app.models.ops import EmailDelivery as D
+
+    with session_factory()() as sess:
+        if hours_ago_delivery is not None:
+            for d in sess.scalars(select(D).where(D.idempotency_key.like("digest:%"))):
+                d.created_at = d.created_at - timedelta(hours=hours_ago_delivery)
+        if hours_ago_reqs is not None:
+            for r in sess.scalars(select(JobRequirement)):
+                r.updated_at = utcnow() - timedelta(hours=hours_ago_reqs)
+        sess.commit()
+
+
+def test_delta_schedule_sends_only_new_changes_and_respects_interval(api, db, connected_account, mailbox, owner):
     from email import message_from_bytes, policy
 
-    from app.models.ops import EmailDelivery as D
-    from app.services.app_settings import DigestSettings
-    from app.services.delivery.digest import digest_org
+    from app.services.app_settings import DigestSchedule, DigestSettings
 
     connected_account("sender@gmail.com", default=True)
-    from app.db.session import session_factory
-
-    org_id = owner[1].id
-
-    def run(c):
-        with session_factory()() as sess:  # a fresh plain session per run, like the worker's
-            return digest_org(sess, org_id, c)
-
-    cfg = DigestSettings(enabled=True, recipients="a@example.com; b@example.com", interval_hours=3)
-    assert cfg.recipients == ["a@example.com", "b@example.com"]
-    assert run(DigestSettings()) == "disabled"
-    assert run(cfg) == "nothing_new"  # no requirements yet: no email
+    run = _runner(owner[1].id)
+    s = DigestSchedule(id="delta1", name="Delta", recipients="a@example.com; b@example.com", mode="delta", frequency="hours", interval_hours=3)
+    assert s.recipients == ["a@example.com", "b@example.com"]
+    assert run(DigestSchedule(id="off", enabled=False)) == "disabled"
+    assert run(s) == "nothing_new"  # no requirements yet: no email
     first = mk(api)
     mk(api, job_title="Rejected Role", client_name="Initech")
-    rej = api.get(f"{API}/requirements").json()["items"]
-    rid = next(x["id"] for x in rej if x["job_title"] == "Rejected Role")
+    rid = next(x["id"] for x in api.get(f"{API}/requirements").json()["items"] if x["job_title"] == "Rejected Role")
     assert api.post(f"{API}/requirements/{rid}/reject", json={}).status_code in (200, 204)
-    assert run(cfg) == "accepted_by_gmail"
+    assert run(s) == "accepted_by_gmail"
     box = mailbox.for_email("sender@gmail.com")
-    assert len(box.sent) == 1
     msg = message_from_bytes(box.sent[0], policy=policy.default)
-    assert msg["To"] == "a@example.com, b@example.com" and msg["X-RecruitmentDesk-Export"] == "1"
+    assert msg["To"] == "a@example.com, b@example.com" and msg["X-RecruitmentDesk-Export"] == "1" and msg["Subject"].startswith("Delta (")
     wb = load_workbook(io.BytesIO(list(msg.iter_attachments())[0].get_payload(decode=True)))
     assert "Rejected Role" not in str([c.value for row in wb.worksheets[0].iter_rows() for c in row])  # rejected requirements are left out
-    assert run(cfg) == "not_due"  # inside the interval
-    assert len(box.sent) == 1
-    with session_factory()() as sess:
-        d = sess.scalar(select(D).where(D.idempotency_key.like("digest:%")))
-        d.created_at = utcnow() - timedelta(hours=4)
-        for r in sess.scalars(select(JobRequirement)):
-            r.updated_at = utcnow() - timedelta(hours=5)  # time passes: everything is older than the digest
-        sess.commit()
-    assert run(cfg) == "nothing_new"  # interval passed but nothing changed: still no email
+    assert run(s) == "not_due" and len(box.sent) == 1  # inside the interval
+    _backdate(hours_ago_delivery=4, hours_ago_reqs=5)  # time passes; nothing has changed since
+    assert run(s) == "nothing_new" and len(box.sent) == 1
     assert api.patch(f"{API}/requirements/{first['id']}", json={"location": "Mumbai"}).status_code == 200
-    assert run(cfg) == "accepted_by_gmail" and len(box.sent) == 2
+    assert run(s) == "accepted_by_gmail" and len(box.sent) == 2
+    # two schedules do not share a cursor: a brand-new delta schedule starts with everything
+    assert run(DigestSchedule(id="delta2", recipients="c@example.com")) == "accepted_by_gmail" and len(box.sent) == 3
+    # settings: the older single-schedule shape is converted, unknown timezones and recipient-less schedules are rejected
+    assert DigestSettings.model_validate({"enabled": True, "recipients": ["x@example.com"], "interval_hours": 6}).schedules[0].interval_hours == 6
+    for bad in ({"timezone": "Mars/Base"}, {"enabled": True, "recipients": []}, {"time_of_day": "25:00"}):
+        try:
+            DigestSchedule(**bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+
+
+def test_daily_all_and_last_days_schedules(api, db, connected_account, mailbox, owner):
+    from app.services.app_settings import DigestSchedule
+
+    connected_account("sender@gmail.com", default=True)
+    run = _runner(owner[1].id)
+    mk(api)
+    mk(api, job_title="Data Engineer", client_name="Initech")
+    box = mailbox.for_email("sender@gmail.com")
+    at = lambda hours_ago: (utcnow() - timedelta(hours=hours_ago)).strftime("%H:%M")  # noqa: E731
+    # a daily 'everything' email whose time of day was an hour ago (UTC, so the slot is deterministic)
+    daily = DigestSchedule(id="nine", name="Everything", recipients="a@example.com", mode="all", frequency="daily", time_of_day=at(1), timezone="UTC")
+    assert run(daily) == "accepted_by_gmail" and len(box.sent) == 1
+    assert run(daily) == "not_due" and len(box.sent) == 1  # once per day
+    # a slot missed by more than the grace window (server was down) waits for the next day instead of sending late
+    late = DigestSchedule(id="late", name="Late", recipients="a@example.com", mode="all", frequency="daily", time_of_day=at(10), timezone="UTC")
+    assert run(late) == "missed_slot" and len(box.sent) == 1
+    # the timezone is honoured: the slot of 09:00 Asia/Kolkata is 03:30 UTC
+    from datetime import datetime, timezone
+
+    from app.services.delivery.digest import latest_slot
+
+    kol = DigestSchedule(id="k", recipients="a@example.com", frequency="daily", time_of_day="09:00", timezone="Asia/Kolkata")
+    assert latest_slot(kol, datetime(2026, 10, 24, 5, 0, tzinfo=timezone.utc)) == datetime(2026, 10, 24, 3, 30, tzinfo=timezone.utc)
+    assert latest_slot(kol, datetime(2026, 10, 24, 2, 0, tzinfo=timezone.utc)) == datetime(2026, 10, 23, 3, 30, tzinfo=timezone.utc)
+    # "last N days": only requirements new or updated inside the window
+    _backdate(hours_ago_reqs=24 * 10)
+    mk(api, job_title="Fresh Role", client_name="Hooli")
+    week = DigestSchedule(id="week", name="Weekly", recipients="a@example.com", mode="last_days", days=7, frequency="hours", interval_hours=1)
+    assert run(week) == "accepted_by_gmail" and len(box.sent) == 2
+    from email import message_from_bytes, policy
+
+    wb = load_workbook(io.BytesIO(list(message_from_bytes(box.sent[1], policy=policy.default).iter_attachments())[0].get_payload(decode=True)))
+    text = str([c.value for row in wb.worksheets[0].iter_rows() for c in row])
+    assert "Fresh Role" in text and "Data Engineer" not in text

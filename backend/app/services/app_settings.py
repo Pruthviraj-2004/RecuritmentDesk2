@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -51,13 +53,21 @@ class NotificationSettings(BaseModel):
     send_failure: bool = True
 
 
-class DigestSettings(BaseModel):
-    """Scheduled email: every N hours, after syncing, send an Excel file of requirements that are new or changed since the last one."""
+class DigestSchedule(BaseModel):
+    """One scheduled email. What to send: only what changed since its previous email ("delta"), everything active ("all"), or whatever was
+    new or updated in the last N days ("last_days"). When: every N hours, or once a day at a set time in a timezone."""
 
-    enabled: bool = False
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12], min_length=1, max_length=40, pattern="^[A-Za-z0-9_-]+$")
+    name: str = Field(default="Requirements update", min_length=1, max_length=80)
+    enabled: bool = True
     recipients: list[str] = Field(default_factory=list)
     sender_email: str = ""  # a connected Gmail account with send access; blank = the default sender account
-    interval_hours: int = Field(default=3, ge=1, le=24)
+    mode: Literal["delta", "all", "last_days"] = "delta"
+    days: int = Field(default=7, ge=1, le=365)  # only used by mode "last_days"
+    frequency: Literal["hours", "daily"] = "hours"
+    interval_hours: int = Field(default=3, ge=1, le=24)  # only used by frequency "hours"
+    time_of_day: str = Field(default="09:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")  # only used by frequency "daily"
+    timezone: str = "UTC"
 
     @field_validator("recipients", mode="before")
     @classmethod
@@ -66,6 +76,44 @@ class DigestSettings(BaseModel):
             parts = v.replace(";", ",").replace(" ", ",").replace(chr(10), ",").split(",")
             return [p.strip() for p in parts if p.strip()]
         return v
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v):
+        from zoneinfo import ZoneInfo
+
+        try:
+            ZoneInfo(v)
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"Unknown timezone {v!r}; use an IANA name such as Asia/Kolkata or UTC") from e
+        return v
+
+    @model_validator(mode="after")
+    def _needs_recipients(self):
+        if self.enabled and not self.recipients:
+            raise ValueError(f"Schedule {self.name!r} is on but has no recipients")
+        return self
+
+
+class DigestSettings(BaseModel):
+    """Scheduled emails (any number). Accepts the older single-schedule shape and converts it."""
+
+    schedules: list[DigestSchedule] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy(cls, v):
+        if isinstance(v, dict) and "schedules" not in v and ("recipients" in v or "enabled" in v):
+            return {"schedules": [{"id": "default", "name": "Requirements update", "enabled": bool(v.get("enabled") and v.get("recipients")), "recipients": v.get("recipients") or [],
+                                   "sender_email": v.get("sender_email", ""), "mode": "delta", "frequency": "hours", "interval_hours": v.get("interval_hours", 3)}]}
+        return v
+
+    @model_validator(mode="after")
+    def _unique_ids(self):
+        ids = [x.id for x in self.schedules]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Schedule ids must be unique")
+        return self
 
 
 SECTIONS: dict[str, type[BaseModel]] = {

@@ -114,14 +114,15 @@ def send_digest_now() -> int:
     from app.db.session import session_scope
     from app.models.ops import AppSetting
     from app.services.app_settings import DigestSettings
-    from app.services.delivery.digest import digest_org
+    from app.services.delivery.digest import digest_schedule
 
     with session_scope() as db:
         rows = list(db.scalars(select(AppSetting).where(AppSetting.section == "digest")))
         if not rows:
             print("Scheduled email is not configured (Settings > Scheduled email).")
         for row in rows:
-            print(f"{row.organization_id}: {digest_org(db, row.organization_id, DigestSettings.model_validate(row.value))}")
+            for sched in DigestSettings.model_validate(row.value).schedules:
+                print(f"{sched.name} ({sched.id}): {digest_schedule(db, row.organization_id, sched)}")
     return 0
 
 
