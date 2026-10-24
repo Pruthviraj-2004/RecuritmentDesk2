@@ -45,7 +45,8 @@ function Composer({ open, onClose, initialExport }: { open: boolean; onClose: ()
       setConfirm(null);
       if (d.status === "accepted_by_gmail") toast.success("Gmail accepted the message. (Inbox delivery is not guaranteed.)");
       else if (d.status === "uncertain") toast.warning(d.error_summary ?? "Delivery outcome is uncertain. Check your Sent folder before retrying.", { duration: 10000 });
-      else toast.error(d.error_summary ?? "The email could not be sent");
+      else if (d.status === "failed") toast.error(d.error_summary ?? "The email could not be sent");
+      else toast.info("Sending… the delivery status below updates automatically.");  // queued / sending: still in progress, not a failure
       onClose();
     },
   });
