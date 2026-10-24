@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -51,12 +51,30 @@ class NotificationSettings(BaseModel):
     send_failure: bool = True
 
 
+class DigestSettings(BaseModel):
+    """Scheduled email: every N hours, after syncing, send an Excel file of requirements that are new or changed since the last one."""
+
+    enabled: bool = False
+    recipients: list[str] = Field(default_factory=list)
+    sender_email: str = ""  # a connected Gmail account with send access; blank = the default sender account
+    interval_hours: int = Field(default=3, ge=1, le=24)
+
+    @field_validator("recipients", mode="before")
+    @classmethod
+    def _split(cls, v):
+        if isinstance(v, str):
+            parts = v.replace(";", ",").replace(" ", ",").replace(chr(10), ",").split(",")
+            return [p.strip() for p in parts if p.strip()]
+        return v
+
+
 SECTIONS: dict[str, type[BaseModel]] = {
     "general": GeneralSettings,
     "gmail": GmailSettings,
     "ai": AISettings,
     "dedup": DedupSettings,
     "notifications": NotificationSettings,
+    "digest": DigestSettings,
 }
 
 

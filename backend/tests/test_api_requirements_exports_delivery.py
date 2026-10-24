@@ -405,3 +405,49 @@ def test_approving_clears_automatic_warnings(api, db):
     assert len(api.get(f"{API}/requirements/{rid}").json()["validation_warnings"]) == 3
     assert api.post(f"{API}/requirements/{rid}/approve").json()["validation_warnings"] == []
 
+
+
+# ---------------------------------------------------------------- scheduled digest
+def test_scheduled_digest_sends_only_new_changes_and_respects_interval(api, db, connected_account, mailbox, owner):
+    from email import message_from_bytes, policy
+
+    from app.models.ops import EmailDelivery as D
+    from app.services.app_settings import DigestSettings
+    from app.services.delivery.digest import digest_org
+
+    connected_account("sender@gmail.com", default=True)
+    from app.db.session import session_factory
+
+    org_id = owner[1].id
+
+    def run(c):
+        with session_factory()() as sess:  # a fresh plain session per run, like the worker's
+            return digest_org(sess, org_id, c)
+
+    cfg = DigestSettings(enabled=True, recipients="a@example.com; b@example.com", interval_hours=3)
+    assert cfg.recipients == ["a@example.com", "b@example.com"]
+    assert run(DigestSettings()) == "disabled"
+    assert run(cfg) == "nothing_new"  # no requirements yet: no email
+    first = mk(api)
+    mk(api, job_title="Rejected Role", client_name="Initech")
+    rej = api.get(f"{API}/requirements").json()["items"]
+    rid = next(x["id"] for x in rej if x["job_title"] == "Rejected Role")
+    assert api.post(f"{API}/requirements/{rid}/reject", json={}).status_code in (200, 204)
+    assert run(cfg) == "accepted_by_gmail"
+    box = mailbox.for_email("sender@gmail.com")
+    assert len(box.sent) == 1
+    msg = message_from_bytes(box.sent[0], policy=policy.default)
+    assert msg["To"] == "a@example.com, b@example.com" and msg["X-RecruitmentDesk-Export"] == "1"
+    wb = load_workbook(io.BytesIO(list(msg.iter_attachments())[0].get_payload(decode=True)))
+    assert "Rejected Role" not in str([c.value for row in wb.worksheets[0].iter_rows() for c in row])  # rejected requirements are left out
+    assert run(cfg) == "not_due"  # inside the interval
+    assert len(box.sent) == 1
+    with session_factory()() as sess:
+        d = sess.scalar(select(D).where(D.idempotency_key.like("digest:%")))
+        d.created_at = utcnow() - timedelta(hours=4)
+        for r in sess.scalars(select(JobRequirement)):
+            r.updated_at = utcnow() - timedelta(hours=5)  # time passes: everything is older than the digest
+        sess.commit()
+    assert run(cfg) == "nothing_new"  # interval passed but nothing changed: still no email
+    assert api.patch(f"{API}/requirements/{first['id']}", json={"location": "Mumbai"}).status_code == 200
+    assert run(cfg) == "accepted_by_gmail" and len(box.sent) == 2

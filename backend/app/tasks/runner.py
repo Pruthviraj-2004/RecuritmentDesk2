@@ -71,6 +71,16 @@ def send_delivery_impl(delivery_id: str) -> None:
         db.close()
 
 
+def send_digests_impl() -> int:
+    from app.services.delivery.digest import run_due_digests
+
+    db = session_factory()()
+    try:
+        return run_due_digests(db)
+    finally:
+        db.close()
+
+
 def schedule_periodic_syncs_impl() -> int:
     """Create sync jobs for every enabled, connected account that is due (no active job)."""
     from app.services.jobs import active_job_for_account, create_job

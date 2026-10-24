@@ -24,6 +24,7 @@ celery_app.conf.update(
         "periodic-sync": {"task": "rd.schedule_periodic_syncs", "schedule": max(1, s.sync_interval_minutes) * 60.0},
         "process-pending": {"task": "rd.process_pending", "schedule": 600.0},
         "resume-stuck": {"task": "rd.resume_stuck", "schedule": 300.0},
+        "send-digests": {"task": "rd.send_digests", "schedule": 600.0},
         "cleanup": {"task": "rd.cleanup", "schedule": 6 * 3600.0},
         "daily-reconcile": {"task": "rd.reconcile", "schedule": 24 * 3600.0},
     },
@@ -63,6 +64,11 @@ def run_export(export_id: str):
 @celery_app.task(name="rd.send_delivery", max_retries=0)  # never auto-retry sends
 def send_delivery(delivery_id: str):
     runner.send_delivery_impl(delivery_id)
+
+
+@celery_app.task(name="rd.send_digests")
+def send_digests():
+    return runner.send_digests_impl()
 
 
 @celery_app.task(name="rd.schedule_periodic_syncs")
