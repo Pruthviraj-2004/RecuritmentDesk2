@@ -1,0 +1,86 @@
+# RecruitmentDesk: PostgreSQL + Redis + API + Celery worker + Celery beat + frontend (nginx).
+#   Copy .env.example to .env first (scripts\setup.ps1 does this and generates keys), then:  docker compose up -d --build
+# Open http://localhost:8080 . The one-shot "migrate" service applies Alembic migrations before the app starts.
+
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  environment: &backend-env
+    APP_ENV: ${APP_ENV:-production}
+    DATABASE_URL: postgresql+psycopg://recruitment:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/recruitmentdesk
+    DATABASE_SCHEMA: ""
+    REDIS_URL: redis://redis:6379/0
+    CELERY_EAGER: "false"
+    STORAGE_PATH: /data/storage
+  volumes: [storage:/data/storage]
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: recruitment
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: recruitmentdesk
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recruitment -d recruitmentdesk"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      db: { condition: service_healthy }
+
+  api:
+    <<: *backend
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "app.tasks.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app:celery_app inspect ping -d celery@$$HOSTNAME --timeout 5 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  beat:
+    <<: *backend
+    command: ["celery", "-A", "app.tasks.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  frontend:
+    build: ./frontend
+    ports: ["${FRONTEND_PORT:-8080}:80"]
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  storage:

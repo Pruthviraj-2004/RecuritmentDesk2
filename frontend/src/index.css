@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 98%;
+    --foreground: 24 10% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 24 10% 10%;
+    --primary: 21 90% 44%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 30 8% 94%;
+    --secondary-foreground: 24 10% 15%;
+    --muted: 30 8% 95%;
+    --muted-foreground: 25 6% 40%;
+    --accent: 25 90% 94%;
+    --accent-foreground: 21 90% 28%;
+    --destructive: 0 72% 46%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 60% 30%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 40%;
+    --warning-foreground: 0 0% 100%;
+    --border: 30 8% 88%;
+    --input: 30 8% 85%;
+    --ring: 21 90% 48%;
+    --radius: 0.5rem;
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 24 10% 20%;
+    --sidebar-border: 30 8% 90%;
+  }
+  .dark {
+    --background: 20 8% 7%;
+    --foreground: 30 10% 94%;
+    --card: 20 8% 10%;
+    --card-foreground: 30 10% 94%;
+    --primary: 24 95% 55%;
+    --primary-foreground: 20 20% 8%;
+    --secondary: 20 6% 16%;
+    --secondary-foreground: 30 10% 92%;
+    --muted: 20 6% 14%;
+    --muted-foreground: 25 8% 65%;
+    --accent: 22 40% 17%;
+    --accent-foreground: 28 95% 75%;
+    --destructive: 0 70% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 55% 45%;
+    --success-foreground: 20 20% 8%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 20 20% 8%;
+    --border: 20 6% 20%;
+    --input: 20 6% 24%;
+    --ring: 24 95% 55%;
+    --sidebar: 20 8% 9%;
+    --sidebar-foreground: 30 10% 88%;
+    --sidebar-border: 20 6% 17%;
+  }
+  * { @apply border-border; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { @apply bg-background text-foreground antialiased; font-feature-settings: "cv11", "ss01"; }
+  :focus-visible { @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+@layer utilities {
+  .tabular { font-variant-numeric: tabular-nums; }
+  .scroll-thin { scrollbar-width: thin; }
+}
