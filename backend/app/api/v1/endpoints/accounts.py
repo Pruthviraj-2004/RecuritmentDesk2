@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -12,9 +13,11 @@ from app.api.deps import Ctx, admin, get_ctx, member, viewer
 from app.core.config import get_settings
 from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.db.session import get_db
+from app.db.types import utcnow
 from app.integrations.gmail_client import GmailError
 from app.models.email import EmailAccount, EmailMessage
 from app.models.enums import ConnectionStatus
+from app.models.ops import ProcessingJob
 from app.models.requirements import RequirementSource
 from app.schemas.api import AccountOut, AccountPatch, ConnectIn, ConnectOut, SyncRequest
 from app.services import jobs
@@ -30,6 +33,19 @@ def mask_email(e: str) -> str:
     return f"{local[:2]}{'*' * max(1, len(local) - 2)}@{domain}"
 
 
+def sync_available_at(db: Session, account_id: uuid.UUID) -> datetime | None:
+    """When a manual sync may next be started for this account, or None if it may be started now."""
+    cooldown = timedelta(seconds=get_settings().manual_sync_cooldown_seconds)
+    if cooldown.total_seconds() <= 0:
+        return None
+    recent = db.scalars(select(ProcessingJob).where(ProcessingJob.email_account_id == account_id, ProcessingJob.job_type == "sync",
+                                                    ProcessingJob.created_at > utcnow() - cooldown).order_by(ProcessingJob.created_at.desc()))
+    for j in recent:
+        if (j.payload or {}).get("trigger") == "manual":
+            return j.created_at + cooldown
+    return None
+
+
 def _out(db: Session, a: EmailAccount, ctx_role_full: bool = True) -> AccountOut:
     total = db.scalar(select(func.count()).select_from(EmailMessage).where(EmailMessage.email_account_id == a.id)) or 0
     by_status = dict(db.execute(select(EmailMessage.processing_status, func.count()).where(EmailMessage.email_account_id == a.id)
@@ -40,6 +56,7 @@ def _out(db: Session, a: EmailAccount, ctx_role_full: bool = True) -> AccountOut
     out.stats = {"messages": total, "processed": by_status.get("processed", 0) + by_status.get("duplicate", 0), "failed": by_status.get("failed", 0),
                  "pending": by_status.get("pending", 0) + by_status.get("awaiting_ai", 0), "requirements": reqs}
     out.masked_email = mask_email(a.email_address)
+    out.sync_available_at = sync_available_at(db, a.id)
     return out
 
 
@@ -139,6 +156,11 @@ def _start_sync(ctx: Ctx, a: EmailAccount, body: SyncRequest | None) -> dict:
     existing = jobs.active_job_for_account(ctx.db, a.id)
     if existing:
         return {"job_id": str(existing.id), "status": existing.status, "already_running": True}
+    wait_until = sync_available_at(ctx.db, a.id)
+    if wait_until:
+        secs = max(1, int((wait_until - utcnow()).total_seconds()))
+        raise AppError(f"A sync was started a moment ago. Try again after {max(1, -(-secs // 60))} minute(s).", code="sync_cooldown", status_code=429,
+                       details={"available_at": wait_until.isoformat(), "retry_after_seconds": secs})
     payload = {"mode": (body.mode if body else "auto"), "trigger": "manual"}
     if body and body.import_days:
         payload["import_days"] = body.import_days
@@ -157,7 +179,7 @@ def sync_all(ctx: Ctx = member):
     for a in accts:
         try:
             results.append({"account": a.email_address, **_start_sync(ctx, a, None)})
-        except ConflictError as e:
+        except (ConflictError, AppError) as e:
             skipped.append({"account": a.email_address, "reason": e.message})
     return {"started": results, "skipped": skipped}
 

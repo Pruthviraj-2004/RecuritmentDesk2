@@ -17,7 +17,7 @@ TMP = tempfile.mkdtemp(prefix="rd-e2e-")
 from cryptography.fernet import Fernet  # noqa: E402
 
 os.environ.update({
-    "APP_ENV": "test", "DATABASE_URL": f"sqlite:///{TMP}/e2e.db", "DATABASE_SCHEMA": "", "REDIS_URL": "", "CELERY_EAGER": "true",
+    "APP_ENV": "test", "DATABASE_URL": f"sqlite:///{TMP}/e2e.db", "DATABASE_SCHEMA": "", "REDIS_URL": "", "CELERY_EAGER": "true", "MANUAL_SYNC_COOLDOWN_SECONDS": "0",
     "SECRET_KEY": "e2e-secret-key-e2e-secret-key-e2e-secret-key", "ENCRYPTION_KEY": Fernet.generate_key().decode(), "GOOGLE_CLIENT_ID": "e2e", "GOOGLE_CLIENT_SECRET": "e2e",
     "AI_PROVIDER": "mock", "STORAGE_PATH": f"{TMP}/storage", "FRONTEND_URL": f"http://localhost:{os.environ.get('E2E_FRONTEND_PORT', '5173')}",
     "GOOGLE_REDIRECT_URI": f"http://localhost:{PORT}/api/v1/email-accounts/oauth/callback", "CORS_ORIGINS": "http://localhost:5173,http://localhost:4173",

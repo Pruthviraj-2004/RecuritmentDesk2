@@ -599,3 +599,32 @@ def test_without_a_worker_long_tasks_run_in_the_background_in_production_only(mo
     monkeypatch.setitem(runner._INLINE, "send_delivery", lambda *_a, **_k: ran.__setitem__("send", threading.current_thread().name))
     runner.enqueue("send_delivery", "d1")
     assert ran["send"] == threading.current_thread().name
+
+
+def test_manual_sync_has_a_five_minute_cooldown_per_account(api, db, connected_account, mailbox, monkeypatch):
+    from datetime import timedelta
+
+    from app.core.config import get_settings
+    from app.db.types import utcnow
+
+    monkeypatch.setattr(get_settings(), "manual_sync_cooldown_seconds", 300)
+    a, b = connected_account("acct1@gmail.com"), connected_account("acct2@gmail.com")
+    use_ai()
+    first = api.post(f"{API}/email-accounts/{a.id}/sync", json={})
+    assert first.status_code == 200 and first.json()["already_running"] is False
+    assert api.get(f"{API}/email-accounts/{a.id}").json()["sync_available_at"] is not None  # the UI disables the button until then
+    again = api.post(f"{API}/email-accounts/{a.id}/sync", json={})  # the first job already finished (inline), so this is the cooldown, not 'already running'
+    assert again.status_code == 429 and again.json()["error"]["code"] == "sync_cooldown"
+    assert 0 < again.json()["error"]["details"]["retry_after_seconds"] <= 300 and "Try again after" in again.json()["error"]["message"]
+    assert api.get(f"{API}/email-accounts/{b.id}").json()["sync_available_at"] is None  # other accounts are not affected
+    assert api.post(f"{API}/email-accounts/{b.id}/sync", json={}).status_code == 200
+    # sync-all reports the cooled-down account as skipped instead of failing
+    allr = api.post(f"{API}/email-accounts/sync-all").json()
+    assert {x["account"] for x in allr["skipped"]} == {"acct1@gmail.com", "acct2@gmail.com"} and all("Try again" in x["reason"] for x in allr["skipped"])
+    # scheduled (automatic) syncs do not start the cooldown, and it ends after five minutes
+    from sqlalchemy import update
+
+    db.execute(update(ProcessingJob).values(created_at=utcnow() - timedelta(minutes=6)))
+    db.commit()
+    assert api.get(f"{API}/email-accounts/{a.id}").json()["sync_available_at"] is None
+    assert api.post(f"{API}/email-accounts/{a.id}/sync", json={}).status_code == 200

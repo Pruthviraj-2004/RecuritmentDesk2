@@ -9,7 +9,7 @@ export type ConnectionStatus = "connected" | "syncing" | "disconnected" | "expir
 export interface Account {
   id: string; email_address: string; masked_email: string; display_name: string | null; provider: string; connection_status: ConnectionStatus;
   sync_enabled: boolean; import_days: number; extra_query: string | null; is_default_sender: boolean; scopes: string[]; can_send: boolean; can_read: boolean;
-  last_synced_at: string | null; last_error: string | null; created_at: string;
+  last_synced_at: string | null; last_error: string | null; created_at: string; sync_available_at?: string | null;
   stats: { messages?: number; processed?: number; failed?: number; pending?: number; requirements?: number };
 }
 

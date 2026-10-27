@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogFooter } from "@/components/ui/dialog";
+import { Tip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown";
 import { Checkbox, Field, Input, Select } from "@/components/ui/form";
 import { useConnectGmail, useReauthorize, useSyncAccount } from "@/hooks/use-gmail";
@@ -50,6 +51,7 @@ function AccountSettings({ account, onClose }: { account: Account; onClose: () =
 function AccountCard({ a }: { a: Account }) {
   const { can } = useAuth();
   const sync = useSyncAccount();
+  const wait = useCooldown(a.sync_available_at);
   const reauth = useReauthorize();
   const [settings, setSettings] = useState(false);
   const [disc, setDisc] = useState(false);
@@ -98,9 +100,13 @@ function AccountCard({ a }: { a: Account }) {
         {needsAuth ? (
           <Button size="sm" disabled={!can("admin")} loading={reauth.isPending} onClick={() => reauth.mutate({ id: a.id, enable_send: true })}><ShieldAlert /> Reauthorize</Button>
         ) : (
-          <Button size="sm" disabled={!can("member") || a.connection_status === "syncing"} loading={sync.isPending && sync.variables?.id === a.id} onClick={() => sync.mutate({ id: a.id })}>
-            <RefreshCw className={a.connection_status === "syncing" ? "animate-spin" : ""} /> {a.connection_status === "syncing" ? "Syncing…" : "Sync now"}
-          </Button>
+          <Tip label={wait > 0 ? `Sync was just requested. Try again after 5 minutes (available in ${mmss(wait)}).` : "Fetch new recruitment emails now"}>
+            <span className="inline-flex" tabIndex={wait > 0 ? 0 : -1}>
+              <Button size="sm" disabled={!can("member") || a.connection_status === "syncing" || wait > 0} loading={sync.isPending && sync.variables?.id === a.id} onClick={() => sync.mutate({ id: a.id })}>
+                <RefreshCw className={a.connection_status === "syncing" ? "animate-spin" : ""} /> {a.connection_status === "syncing" ? "Syncing…" : wait > 0 ? `Sync again in ${mmss(wait)}` : "Sync now"}
+              </Button>
+            </span>
+          </Tip>
         )}
         {!a.can_send && !needsAuth && <Button size="sm" variant="outline" disabled={!can("admin")} onClick={() => reauth.mutate({ id: a.id, enable_send: true })}>Grant send permission</Button>}
       </div>
@@ -114,6 +120,21 @@ function AccountCard({ a }: { a: Account }) {
     </CardContent></Card>
   );
 }
+
+/** Seconds left until `until` (an ISO time from the server), ticking once a second; 0 when there is no cooldown. */
+function useCooldown(until: string | null | undefined): number {
+  const left = () => (until ? Math.max(0, Math.ceil((new Date(until).getTime() - Date.now()) / 1000)) : 0);
+  const [secs, setSecs] = useState(left);
+  useEffect(() => {
+    setSecs(left());
+    if (!until) return;
+    const t = setInterval(() => { const s = left(); setSecs(s); if (s === 0) clearInterval(t); }, 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [until]);
+  return secs;
+}
+const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
 export function AccountsPage() {
   const q = useAccounts();

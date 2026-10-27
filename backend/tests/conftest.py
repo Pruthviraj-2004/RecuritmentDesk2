@@ -8,7 +8,7 @@ import uuid
 
 _TMP = tempfile.mkdtemp(prefix="rd-tests-")
 os.environ.update({
-    "APP_ENV": "test", "DATABASE_URL": f"sqlite:///{_TMP}/test.db", "DATABASE_SCHEMA": "", "REDIS_URL": "", "CELERY_EAGER": "true",
+    "APP_ENV": "test", "DATABASE_URL": f"sqlite:///{_TMP}/test.db", "DATABASE_SCHEMA": "", "REDIS_URL": "", "CELERY_EAGER": "true", "MANUAL_SYNC_COOLDOWN_SECONDS": "0",
     "SECRET_KEY": "test-secret-key-test-secret-key-test-secret",
     "GOOGLE_CLIENT_ID": "test-client-id", "GOOGLE_CLIENT_SECRET": "test-client-secret", "AI_PROVIDER": "none", "AI_API_KEY": "",
     "STORAGE_PATH": f"{_TMP}/storage", "INITIAL_ADMIN_EMAIL": "", "INITIAL_ADMIN_PASSWORD": "", "FRONTEND_URL": "http://localhost:5173",

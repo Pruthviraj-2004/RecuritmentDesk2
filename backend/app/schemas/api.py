@@ -73,6 +73,7 @@ class AccountOut(ORM):
     created_at: datetime
     stats: dict[str, Any] = {}
     masked_email: str = ""
+    sync_available_at: datetime | None = None  # set while a manual sync is on cooldown
 
 
 class ConnectIn(BaseModel):

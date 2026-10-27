@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     initial_org_name: str = "My Recruitment Desk"
 
     sync_interval_minutes: int = 15
+    manual_sync_cooldown_seconds: int = 300  # after a manual "Sync now", the same account cannot be synced manually again for this long
     gmail_requests_per_second: float = 4.0  # max Gmail API calls per second (a message fetch costs 5 of Gmail's 250 units/second); lower = gentler
     gmail_max_retries: int = 6  # in-call retries with exponential backoff on rate limits / server errors
     initial_import_days: int = 30

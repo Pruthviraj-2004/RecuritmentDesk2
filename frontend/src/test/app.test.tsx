@@ -168,6 +168,15 @@ describe("accounts", () => {
     expect(screen.getByRole("button", { name: "Reauthorize" })).toBeInTheDocument(); expect(screen.getByRole("button", { name: /Sync now/ })).toBeInTheDocument();
     expect(screen.getAllByText("Default sender").length).toBeGreaterThan(0);
   });
+  it("disables Sync now during the 5 minute cooldown and explains why on hover", async () => {
+    const until = new Date(Date.now() + 4 * 60_000 + 30_000).toISOString();
+    mockApi({ "GET /email-accounts": [acct({ sync_available_at: until })] });
+    renderApp(<AccountsPage />, "/accounts");
+    const btn = await screen.findByRole("button", { name: /Sync again in 4:/ });
+    expect(btn).toBeDisabled();
+    await userEvent.hover(btn.parentElement!);
+    expect((await screen.findAllByText(/Try again after 5 minutes/)).length).toBeGreaterThan(0);
+  });
   it("starts a real sync request and shows the empty state when no accounts exist", async () => {
     const calls = mockApi({ "GET /email-accounts": [acct()], "POST /email-accounts/a1/sync": { job_id: "j1", status: "queued", already_running: false } });
     renderApp(<AccountsPage />, "/accounts");
