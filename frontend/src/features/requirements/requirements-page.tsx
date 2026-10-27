@@ -1,5 +1,5 @@
 import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
-import { Archive, Check, ChevronDown, Copy, Eye, FileSpreadsheet, MoreHorizontal, Pencil, Plus, RotateCcw, Search, X } from "lucide-react";
+import { Archive, Check, ChevronDown, Copy, Eye, FileSpreadsheet, FileUp, MoreHorizontal, Pencil, Plus, RotateCcw, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ import { Checkbox, Field, Input, Select } from "@/components/ui/form";
 import { api } from "@/lib/api";
 import { fmtDate, fmtExperience, fmtSalary } from "@/lib/utils";
 import { ExportDialog } from "@/features/exports/export-dialog";
+import { RequirementImportDialog } from "@/features/requirements/import-dialog";
 import { RequirementForm } from "@/features/requirements/requirement-form";
 import { reqKeys, useAccounts, useAction, useRequirementAction, useRequirements } from "@/services/hooks";
 import type { Requirement } from "@/types/api";
@@ -32,6 +33,7 @@ export function RequirementsPage() {
   const [selection, setSelection] = useState<RowSelectionState>({});
   const [showMore, setShowMore] = useState(() => MORE_KEYS.some((k) => sp.has(k)));
   const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
 
   // restore the last used filters when arriving without any (filter state survives navigation)
@@ -140,6 +142,7 @@ export function RequirementsPage() {
     <>
       <PageHeader title="Recruitment Requirements" description="Canonical, de-duplicated job requirements extracted from all connected accounts."
         actions={<>
+          <Button variant="outline" disabled={!writable} onClick={() => setImportOpen(true)}><FileUp /> Import</Button>
           <Button variant="outline" onClick={() => setExportOpen(true)}><FileSpreadsheet /> Export{selectedIds.length ? ` (${selectedIds.length})` : ""}</Button>
           <Button disabled={!writable} onClick={() => setCreateOpen(true)}><Plus /> New requirement</Button>
         </>} />
@@ -207,6 +210,7 @@ export function RequirementsPage() {
         </>
       )}
 
+      {importOpen && <RequirementImportDialog open onOpenChange={setImportOpen} />}
       {exportOpen && <ExportDialog open onOpenChange={setExportOpen} selectedIds={selectedIds} filters={filters} />}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent title="New requirement" description="Create a requirement manually. Source emails can be linked afterwards." size="lg">

@@ -568,3 +568,81 @@ def test_tick_pass_runs_every_step_and_sends_due_scheduled_emails(api, db, conne
 
         time.sleep(0.1)
     assert tick.status()["last_result"] is not None
+
+
+# ---------------------------------------------------------------- requirement import (xlsx / csv)
+def _up(api, url, name, data, **form):
+    return api.c.post(url, files={"file": (name, data)}, data=form, headers=api._h())
+
+
+def _xlsx(rows, headers=None):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(headers or ["Job Title", "Client", "Job ID", "Location", "Experience", "Skills", "Work Mode", "Salary", "Recruiter Email"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_requirement_import_template_preview_commit_and_duplicates(api):
+    # the sample file downloads as xlsx and csv and can itself be imported
+    for fmt in ("xlsx", "csv"):
+        t = api.get(f"{API}/requirements/import/template", params={"format": fmt})
+        assert t.status_code == 200 and ("requirement-import-template." + fmt) in t.headers["content-disposition"]
+    blank = api.get(f"{API}/requirements/import/template", params={"format": "csv", "examples": "false"}).content.decode("utf-8-sig").strip().splitlines()
+    assert len(blank) == 1 and blank[0].startswith("job_title,client_name")
+    sample = api.get(f"{API}/requirements/import/template").content
+    ws = load_workbook(io.BytesIO(sample))
+    assert ws.sheetnames == ["Requirements", "Instructions"]
+    p = _up(api, f"{API}/requirements/import/preview", "t.xlsx", sample, on_duplicate="skip").json()
+    assert p["counts"]["create"] == 2 and p["counts"]["error"] == 0 and p["ignored_columns"] == []
+
+    # tolerant headers (aliases, any order), experience range, skills split, mode synonyms; bad rows are reported, not fatal
+    rows = [["Python Developer", "Globex", "GX-1", "Pune", "5-8", "Python, Django; AWS", "WFH", "25,00,000", "jane@staffing.com"],
+            ["", "Initech", "IN-2", "Mumbai", "3", "Java", "hybrid", "", ""],  # no title
+            ["Data Engineer", "Hooli", "", "Remote", "abc", "Spark", "remote", "", "not-an-email"],  # bad experience + email
+            ["Python Developer", "Globex", "GX-1", "Pune", "5-8", "Python", "remote", "", ""]]  # same job again in the file
+    data = _xlsx(rows)
+    pv = _up(api, f"{API}/requirements/import/preview", "jobs.xlsx", data, on_duplicate="skip")
+    assert pv.status_code == 200
+    c = pv.json()["counts"]
+    assert c == {"create": 1, "update": 0, "skip_duplicate": 0, "skip_in_file": 1, "error": 2}
+    assert api.get(f"{API}/requirements").json()["total"] == 0  # a preview saves nothing
+
+    r = _up(api, f"{API}/requirements/import", "jobs.xlsx", data, on_duplicate="skip")
+    assert r.status_code == 201 and (r.json()["created"], r.json()["failed"], r.json()["skipped"]) == (1, 2, 1)
+    items = api.get(f"{API}/requirements").json()["items"]
+    assert len(items) == 1
+    got = items[0]
+    assert got["job_title"] == "Python Developer" and got["client_name"] == "Globex" and got["work_mode"] == "remote"
+    assert got["minimum_experience"] == 5 and got["maximum_experience"] == 8 and sorted(got["required_skills"]) == ["AWS", "Django", "Python"]
+    assert got["review_status"] == "approved"  # mark_approved defaults to on
+    assert api.get(f"{API}/requirements/{got['id']}/versions").json()[0]["change_source"] == "import"
+
+    # importing the same file again: the job is now a duplicate of an existing requirement
+    again = _up(api, f"{API}/requirements/import/preview", "jobs.xlsx", data, on_duplicate="skip").json()
+    assert again["counts"]["skip_duplicate"] == 1 and again["counts"]["create"] == 0
+    assert _up(api, f"{API}/requirements/import", "jobs.xlsx", data, on_duplicate="skip").status_code == 422  # nothing to import
+    # ... or update the existing requirement with the non-empty cells
+    upd = _xlsx([["Python Developer", "Globex", "GX-1", "Pune", "6-9", "Python, Django, AWS, Docker", "hybrid", "", ""]])
+    u = _up(api, f"{API}/requirements/import", "upd.xlsx", upd, on_duplicate="update", mark_approved="false").json()
+    assert (u["created"], u["updated"]) == (0, 1)
+    now = api.get(f"{API}/requirements/{got['id']}").json()
+    assert now["minimum_experience"] == 6 and now["work_mode"] == "hybrid" and "Docker" in now["required_skills"] and now["review_status"] == "approved"
+
+
+def test_requirement_import_csv_unsafe_files_permissions(api, client):
+    csv_data = "title;client;skills;exp\nBackend Engineer;Acme;Go|Postgres;2-4\n".encode()
+    r = _up(api, f"{API}/requirements/import", "jobs.csv", csv_data, on_duplicate="skip", mark_approved="false")
+    assert r.status_code == 201 and r.json()["created"] == 1
+    got = api.get(f"{API}/requirements").json()["items"][0]
+    assert got["job_title"] == "Backend Engineer" and got["review_status"] == "needs_review" and sorted(got["required_skills"]) == ["Go", "Postgres"]
+    bad = _up(api, f"{API}/requirements/import/preview", "x.csv", b"foo,bar\n1,2\n", on_duplicate="skip")
+    assert bad.status_code == 422 and "job title" in bad.text.lower()
+    assert _up(api, f"{API}/requirements/import/preview", "m.xlsm", b"PK\x03\x04junk", on_duplicate="skip").status_code == 422
+    assert _up(api, f"{API}/requirements/import/preview", "e.csv", b"", on_duplicate="skip").status_code == 422
+    assert _up(api, f"{API}/requirements/import/preview", "x.csv", csv_data, on_duplicate="weird").status_code == 422

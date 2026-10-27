@@ -3,13 +3,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import Ctx, admin, member, viewer
 from app.services.gmail.links import gmail_url
-from app.core.exceptions import AppError, ConflictError
+from app.core.exceptions import AppError, ConflictError, ValidationFailure
 from app.models.email import EmailAccount, EmailMessage
 from app.models.enums import DuplicateStatus, LifecycleStatus, ReviewStatus
 from app.models.requirements import DuplicateCandidate, JobRequirement, RequirementSource, RequirementVersion
@@ -26,6 +26,7 @@ from app.schemas.api import (
 )
 from app.services.audit import service as audit
 from app.services.deduplication.matcher import compare, profile_from_requirement
+from app.services.requirements import importer
 from app.services.requirements import service as svc
 from app.services.requirements.query import RequirementFilters, apply_filters, apply_sort
 
@@ -79,6 +80,43 @@ def list_requirements(ctx: Ctx = viewer, f: RequirementFilters = Depends(filters
     stmt = apply_sort(base.options(selectinload(JobRequirement.skills)), sort, direction).limit(page_size).offset((page - 1) * page_size)
     rows = list(ctx.db.scalars(stmt))
     return Page(items=build_outputs(ctx.db, rows), total=total, page=page, page_size=page_size)
+
+
+@router.get("/import/template")
+def import_template(ctx: Ctx = viewer, format: str = Query("xlsx", pattern="^(csv|xlsx)$"), examples: bool = True):
+    """Sample file with the standard columns (and an Instructions sheet in the Excel version)."""
+    data, name, mime = importer.build_template(format, examples)
+    return Response(content=data, media_type=mime, headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    data = file.file.read(importer.MAX_BYTES + 1)
+    if len(data) > importer.MAX_BYTES:
+        raise ValidationFailure(f"File is larger than {importer.MAX_BYTES // (1024 * 1024)} MB")
+    return data
+
+
+@router.post("/import/preview")
+def import_preview(file: UploadFile = File(...), on_duplicate: str = Form("skip"), ctx: Ctx = member):
+    """Dry run: validates every row and reports what would happen. Nothing is saved."""
+    a = importer.analyse(ctx.db, ctx.org_id, file.filename or "upload", _read_upload(file), on_duplicate)
+    problems = [r.public() for r in a.rows if r.action != "create" or r.warnings]
+    return {"total_rows": a.total, "counts": a.counts(), "recognised_columns": a.recognised, "ignored_columns": a.unknown_headers,
+            "problems": problems[:100], "sample": [r.public() for r in a.rows if r.action == "create"][:10], "truncated": len(problems) > 100}
+
+
+@router.post("/import", status_code=201)
+def import_commit(file: UploadFile = File(...), on_duplicate: str = Form("skip"), mark_approved: bool = Form(True), ctx: Ctx = member):
+    name = file.filename or "upload"
+    a = importer.analyse(ctx.db, ctx.org_id, name, _read_upload(file), on_duplicate)
+    c = a.counts()
+    if c["create"] + c["update"] == 0:
+        raise ValidationFailure("There is nothing to import: every row was invalid or a duplicate. Run the check to see why.", code="nothing_to_import")
+    result = importer.commit(ctx.db, ctx.org_id, ctx.user_id, a, approve=mark_approved)
+    audit.record(ctx.db, org_id=ctx.org_id, user_id=ctx.user_id, action="requirements.imported", entity_type="requirement_import", entity_id=None,
+                 metadata={"file": name[:100], "created": result["created"], "updated": result["updated"], "skipped": result["skipped"], "failed": result["failed"]})
+    ctx.db.commit()
+    return {"filename": name, **result}
 
 
 @router.post("", response_model=RequirementDetail, status_code=201)
