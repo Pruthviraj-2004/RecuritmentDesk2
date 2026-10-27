@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     initial_org_name: str = "My Recruitment Desk"
 
     sync_interval_minutes: int = 15
+    gmail_requests_per_second: float = 4.0  # max Gmail API calls per second (a message fetch costs 5 of Gmail's 250 units/second); lower = gentler
+    gmail_max_retries: int = 6  # in-call retries with exponential backoff on rate limits / server errors
     initial_import_days: int = 30
     max_import_days: int = 365
     max_attachment_size_mb: int = 15

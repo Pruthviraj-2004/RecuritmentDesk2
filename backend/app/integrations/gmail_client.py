@@ -5,13 +5,16 @@ All network access goes through these two classes so tests can replace them with
 from __future__ import annotations
 
 import base64
+import random
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
 import httpx
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -32,7 +35,7 @@ class GmailAuthError(GmailError):
 
 
 class GmailRateLimited(GmailError):
-    pass
+    retry_after: float | None = None  # seconds Gmail asked us to wait, when it said
 
 
 class GmailTransient(GmailError):
@@ -159,6 +162,61 @@ def _map_http_error(e: Any) -> Exception:
     return GmailError(f"Gmail API error {status}")
 
 
+_sleep = time.sleep  # patched in tests
+
+
+class RateGovernor:
+    """Spaces out Gmail API calls so a big mailbox is read steadily instead of in a burst, and slows down further after any rate-limit reply.
+
+    One governor is shared by every Gmail call in the process. The gap between calls is 1/GMAIL_REQUESTS_PER_SECOND, multiplied by a penalty that
+    doubles (up to 8x) each time Gmail says "slow down" and eases back to 1x as calls succeed again.
+    """
+
+    def __init__(self, per_second: float):
+        self.base = 1.0 / max(0.1, per_second)
+        self.penalty = 1.0
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next - now)
+            self._next = max(now, self._next) + self.base * self.penalty
+        if delay:
+            _sleep(delay)
+
+    def hit(self) -> None:
+        self.penalty = min(8.0, self.penalty * 2)
+
+    def ok(self) -> None:
+        self.penalty = max(1.0, self.penalty * 0.97)
+
+
+_governor: RateGovernor | None = None
+
+
+def governor() -> RateGovernor:
+    global _governor
+    per_second = get_settings().gmail_requests_per_second
+    if _governor is None or abs(_governor.base - 1.0 / max(0.1, per_second)) > 1e-9:
+        _governor = RateGovernor(per_second)
+    return _governor
+
+
+def _backoff_seconds(attempt: int, retry_after: float | None = None) -> float:
+    wait = min(120.0, 2.0 * (2 ** attempt)) + random.uniform(0, 1)
+    return max(wait, min(retry_after, 300.0)) if retry_after else wait
+
+
+def _retry_after(e: Any) -> float | None:
+    raw = getattr(getattr(e, "resp", None), "get", lambda *_: None)("retry-after")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class GoogleGmailGateway:
     """Real Gmail API client built on googleapiclient. Created per task with a fresh access token."""
 
@@ -169,14 +227,31 @@ class GoogleGmailGateway:
         self._svc = build("gmail", "v1", credentials=Credentials(token=access_token), cache_discovery=False)
 
     def _exec(self, req):
+        """Run one Gmail request: paced by the governor, retried with exponential backoff (honouring Retry-After) on rate limits and server errors."""
         from googleapiclient.errors import HttpError
 
-        try:
-            return req.execute(num_retries=2)
-        except HttpError as e:
-            raise _map_http_error(e) from e
-        except (TimeoutError, ConnectionError, OSError) as e:
-            raise GmailTransient(type(e).__name__) from e
+        gov, max_retries, attempt = governor(), get_settings().gmail_max_retries, 0
+        while True:
+            gov.wait()
+            try:
+                result = req.execute(num_retries=0)
+                gov.ok()
+                return result
+            except HttpError as e:
+                err = _map_http_error(e)
+                limited = isinstance(err, GmailRateLimited)
+                if limited:
+                    gov.hit()
+                    err.retry_after = _retry_after(e)
+                if not isinstance(err, (GmailRateLimited, GmailTransient)) or attempt >= max_retries:
+                    raise err from e
+                _sleep(_backoff_seconds(attempt, _retry_after(e)))
+                attempt += 1
+            except (TimeoutError, ConnectionError, OSError) as e:
+                if attempt >= max_retries:
+                    raise GmailTransient(type(e).__name__) from e
+                _sleep(_backoff_seconds(attempt))
+                attempt += 1
 
     def get_profile(self) -> dict:
         return self._exec(self._svc.users().getProfile(userId="me"))
@@ -207,6 +282,7 @@ class GoogleGmailGateway:
         from googleapiclient.errors import HttpError
 
         body = {"raw": base64.urlsafe_b64encode(raw_rfc822).decode()}
+        governor().wait()
         try:
             # num_retries=0 on purpose: never auto-resend, the first attempt might already have been accepted.
             return self._svc.users().messages().send(userId="me", body=body).execute(num_retries=0)

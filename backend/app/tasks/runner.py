@@ -6,7 +6,7 @@ Each implementation opens its own DB session and is idempotent, so retries and d
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
@@ -141,6 +141,9 @@ def resume_stuck_jobs_impl() -> int:
                                                             ProcessingJob.updated_at < cutoff)))
         out = []
         for j in stuck:
+            ra = (j.checkpoint or {}).get("resume_after")  # paused after a Gmail rate limit: not stuck, just cooling down
+            if ra and datetime.fromisoformat(ra) > utcnow():
+                continue
             if j.attempts >= j.max_attempts:
                 jobs.finish(j, JobStatus.FAILED, "Abandoned after repeated worker interruptions")
                 continue

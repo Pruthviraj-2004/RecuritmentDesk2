@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -33,6 +34,7 @@ from app.services.normalization.text import message_content_hash
 log = get_logger(__name__)
 
 PAGE_SIZE = 100
+MAX_RATE_LIMIT_PAUSES = 30  # about a day of pauses at the 1-hour cap before the job is given up
 
 
 class RetryableSyncError(Exception):
@@ -108,6 +110,9 @@ def run_sync_job(db: Session, job_id: uuid.UUID) -> list[uuid.UUID]:
         jobs.finish(job, JobStatus.CANCELLED)
         db.commit()
         return []
+    resume_after = (job.checkpoint or {}).get("resume_after")
+    if resume_after and datetime.fromisoformat(resume_after) > utcnow():
+        return []  # paused after a Gmail rate limit: leave it queued until the cooldown has passed
 
     jobs.start(job)
     previous_status = acct.connection_status
@@ -122,6 +127,7 @@ def run_sync_job(db: Session, job_id: uuid.UUID) -> list[uuid.UUID]:
     try:
         gw = gateway_for(db, acct)
         ck = dict(job.checkpoint or {})
+        ck.pop("resume_after", None)
         if "history_start" not in ck:
             ck["history_start"] = str(gw.get_profile().get("historyId") or "")
         mode = ck.get("mode")
@@ -177,6 +183,24 @@ def run_sync_job(db: Session, job_id: uuid.UUID) -> list[uuid.UUID]:
         db.rollback()
         job = db.get(ProcessingJob, job_id)
         acct = db.get(EmailAccount, acct.id)
+        if isinstance(e, GmailRateLimited):
+            # A rate limit is not a failure. Pause with a growing cooldown and carry on from the checkpoint; it never uses up the retry budget.
+            ck = dict(job.checkpoint or {})
+            hits = int(ck.get("rate_limit_hits", 0)) + 1
+            if hits > MAX_RATE_LIMIT_PAUSES:
+                _fail(db, job_id, acct.id, f"Gmail kept rate limiting this mailbox ({hits - 1} pauses). Try again later or lower GMAIL_REQUESTS_PER_SECOND.", expired=False)
+                return new_ids
+            cooldown = timedelta(minutes=min(60, 5 * 2 ** (hits - 1)))
+            resume_at = utcnow() + cooldown
+            ck["rate_limit_hits"], ck["resume_after"] = hits, resume_at.isoformat()
+            job.checkpoint = ck
+            job.attempts = max(0, job.attempts - 1)
+            job.status = JobStatus.QUEUED
+            job.error_summary = f"Gmail asked us to slow down. Paused until {resume_at:%H:%M} UTC; it resumes automatically where it left off."
+            acct.connection_status = ConnectionStatus.CONNECTED if previous_status == ConnectionStatus.SYNCING else previous_status
+            db.commit()
+            log.warning("sync_rate_limited_paused", extra={"job_id": str(job_id), "pause_minutes": int(cooldown.total_seconds() // 60), "hits": hits})
+            return new_ids
         if job.attempts >= job.max_attempts:
             _fail(db, job_id, acct.id, f"Gave up after {job.attempts} attempts: {e}", expired=False)
             return new_ids

@@ -58,3 +58,9 @@ attachments (safe parse) → rule-based classification (clear noise skips the AI
 ## Frontend (`frontend/src`)
 
 React + strict TypeScript + Vite + Tailwind. Server state via TanStack Query, tables via TanStack Table (server-side pagination/sort/filter), forms via React Hook Form + Zod. Features are folders under `features/`; reusable pieces under `components/`. The session lives in an HttpOnly cookie; the CSRF token is held **in memory only**. Filter state for the requirements list lives in the URL.
+
+## Staying under Gmail's rate limits
+
+* **Pacing:** every Gmail call goes through one governor that spaces calls `1 / GMAIL_REQUESTS_PER_SECOND` apart (default 4/s, about 20 of Gmail's 250 quota units per second). A 1,000-message mailbox is read steadily in a few minutes instead of in a burst.
+* **Backoff:** a 429 / rateLimitExceeded reply doubles the gap (up to 8x, easing back as calls succeed) and the call is retried up to `GMAIL_MAX_RETRIES` times with exponential waits, honouring Gmail's `Retry-After`.
+* **Pause, not fail:** if Gmail still refuses, the sync job is paused (status queued, cooldown 5, 10, 20, 40 then 60 minutes, stored as `resume_after` in its checkpoint) and carries on from the last page when the cooldown ends. Rate limits never use up the job's retry attempts; it is only given up after 30 pauses. Already-stored messages are never fetched again.

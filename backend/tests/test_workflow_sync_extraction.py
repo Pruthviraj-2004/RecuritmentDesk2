@@ -467,3 +467,101 @@ def test_messages_deleted_in_gmail_are_skipped_not_errors_and_real_failures_leav
     assert job.stats["skipped_missing"] == 1 and job.stats["message_errors"] == 1  # only the real failure counts as an error
     assert job.checkpoint["error_samples"] == ["0d000003: ValueError: boom while storing"] and "could not be stored" in job.error_summary
 
+
+
+def test_gmail_rate_limit_pauses_the_sync_and_resumes_later_without_failing(api, db, connected_account, mailbox):
+    from datetime import timedelta
+
+    from app.db.types import utcnow
+    from app.integrations.gmail_client import GmailRateLimited
+    from app.tasks.runner import resume_stuck_jobs_impl, sync_account_impl
+
+    a = connected_account("acct1@gmail.com")
+    box = mailbox.for_email("acct1@gmail.com")
+    box.page_size = 2
+    for i in range(5):
+        box.add(jd_message(f"cccc000{i}", subject=f"Job {i} requirement", body=JD_BODY.replace("GX-1042", f"GX-{i}00")))
+    use_ai()
+    box.fail_get["cccc0003"] = GmailRateLimited("rate limit")  # Gmail says slow down on page 2
+    j = sync(api, a.id)
+    db.expire_all()
+    import uuid
+
+    job = db.get(ProcessingJob, uuid.UUID(j["job_id"]))
+    assert job.status == "queued" and job.attempts == 0  # a rate limit never uses up the attempt budget
+    assert job.checkpoint["rate_limit_hits"] == 1 and "resume_after" in job.checkpoint and "slow down" in job.error_summary
+    assert count(db, EmailMessage) == 2  # page 1 is kept
+    # while cooling down, re-running does nothing (no Gmail calls), and the 'stuck job' recovery leaves it alone
+    del box.fail_get["cccc0003"]
+    box.calls.clear()
+    sync_account_impl(str(job.id))
+    assert box.calls == []
+    job.updated_at = utcnow() - timedelta(minutes=30)
+    db.commit()
+    assert resume_stuck_jobs_impl() == 0 and db.get(ProcessingJob, job.id).status == "queued"
+    # once the cooldown has passed it carries on from the checkpoint and finishes
+    job = db.get(ProcessingJob, job.id)
+    ck = dict(job.checkpoint)
+    ck["resume_after"] = (utcnow() - timedelta(minutes=1)).isoformat()
+    job.checkpoint = ck
+    db.commit()
+    sync_account_impl(str(job.id))
+    db.expire_all()
+    done = db.get(ProcessingJob, job.id)
+    assert done.status == "completed" and count(db, EmailMessage) == 5 and "resume_after" not in done.checkpoint
+
+
+def test_gmail_gateway_paces_calls_backs_off_and_honours_retry_after(monkeypatch):
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    from app.integrations import gmail_client as gc
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(gc, "_sleep", sleeps.append)
+    monkeypatch.setattr(gc, "_governor", None)
+    gw = gc.GoogleGmailGateway.__new__(gc.GoogleGmailGateway)
+
+    class Req:
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+
+        def execute(self, num_retries=0):
+            o = self.outcomes.pop(0)
+            if isinstance(o, Exception):
+                raise o
+            return o
+
+    def http_error(status, retry_after=None, reason=""):
+        headers = {"status": str(status), **({"retry-after": str(retry_after)} if retry_after else {})}
+        return HttpError(httplib2.Response(headers), b"{}", uri="u")
+
+    # two 429s then success: retried with growing waits, the penalty slows later calls
+    assert gw._exec(Req([http_error(429), http_error(429, retry_after=30), {"ok": 1}])) == {"ok": 1}
+    waits = [s for s in sleeps if s >= 2]
+    assert len(waits) == 2 and waits[1] >= 30  # Retry-After from Gmail is honoured
+    assert gc.governor().penalty > 1.0
+    # a permanent error is not retried
+    n = len([x for x in sleeps if x >= 2])
+    try:
+        gw._exec(Req([http_error(404)]))
+        raise AssertionError("expected GmailNotFound")
+    except gc.GmailNotFound:
+        pass
+    assert len([x for x in sleeps if x >= 2]) == n  # no backoff wait for a permanent error
+    # retries are bounded: after GMAIL_MAX_RETRIES the rate-limit error is raised for the sync job to pause on
+    from app.core.config import get_settings
+
+    over = [http_error(429)] * (get_settings().gmail_max_retries + 1)
+    try:
+        gw._exec(Req(over))
+        raise AssertionError("expected GmailRateLimited")
+    except gc.GmailRateLimited:
+        pass
+    # calls are spaced: at 4 per second each call is scheduled 0.25s after the previous one (the patched sleep returns at once,
+    # so the requested waits simply grow by one gap per call)
+    gov = gc.RateGovernor(4)
+    sleeps.clear()
+    for _ in range(10):
+        gov.wait()
+    assert len(sleeps) >= 9 and all(abs((b - a) - 0.25) < 0.03 for a, b in zip(sleeps, sleeps[1:]))
