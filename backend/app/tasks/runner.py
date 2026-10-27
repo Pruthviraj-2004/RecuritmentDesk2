@@ -6,6 +6,8 @@ Each implementation opens its own DB session and is idempotent, so retries and d
 from __future__ import annotations
 
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -208,15 +210,40 @@ def use_inline() -> bool:
     return s.celery_eager or not s.redis_url
 
 
+_BACKGROUND_TASKS = {"sync_account", "process_email"}  # long-running: in production without a worker they must not hold a web request open
+_pool: ThreadPoolExecutor | None = None
+_pool_lock = threading.Lock()
+
+
+def _background_pool() -> ThreadPoolExecutor:
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inline-task")
+        return _pool
+
+
+def _run_inline(name: str, args: tuple, kwargs: dict) -> None:
+    """Run a task the way a worker would: failures are logged, never raised (the state is already persisted)."""
+    try:
+        _INLINE[name](*args, **kwargs)
+    except (RetryableSyncError, TransientProcessingError) as e:
+        log.warning("task_retry_needed_inline", extra={"task": name, "error": str(e)[:200]})
+    except Exception:  # noqa: BLE001
+        log.exception("inline_task_failed", extra={"task": name})
+
+
 def enqueue(name: str, *args, **kwargs) -> None:
-    """Dispatch a task. Inline mode swallows+logs exceptions the way a worker would (state is already persisted)."""
+    """Dispatch a task.
+
+    With Celery it goes to the queue. Without a worker it runs in this process: short tasks right away; in production the long ones
+    (sync, extraction) go to a small thread pool so the request returns at once and the work continues after the browser is closed.
+    """
     if use_inline():
-        try:
-            _INLINE[name](*args, **kwargs)
-        except (RetryableSyncError, TransientProcessingError) as e:
-            log.warning("task_retry_needed_inline", extra={"task": name, "error": str(e)[:200]})
-        except Exception:  # noqa: BLE001
-            log.exception("inline_task_failed", extra={"task": name})
+        if get_settings().is_production and name in _BACKGROUND_TASKS:
+            _background_pool().submit(_run_inline, name, args, kwargs)
+        else:
+            _run_inline(name, args, kwargs)
         return
     from app.tasks.celery_app import celery_app
 

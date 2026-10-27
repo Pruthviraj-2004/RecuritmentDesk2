@@ -565,3 +565,37 @@ def test_gmail_gateway_paces_calls_backs_off_and_honours_retry_after(monkeypatch
     for _ in range(10):
         gov.wait()
     assert len(sleeps) >= 9 and all(abs((b - a) - 0.25) < 0.03 for a, b in zip(sleeps, sleeps[1:]))
+
+
+def test_without_a_worker_long_tasks_run_in_the_background_in_production_only(monkeypatch):
+    import threading
+
+    from app.core.config import get_settings
+    from app.tasks import runner
+
+    ran: dict[str, str] = {}
+    gate, done = threading.Event(), threading.Event()
+
+    def slow(*_a, **_k):
+        gate.wait(5)  # still running when enqueue() has already returned
+        ran["thread"] = threading.current_thread().name
+        done.set()
+
+    monkeypatch.setitem(runner._INLINE, "sync_account", slow)
+    monkeypatch.setattr(get_settings(), "redis_url", "")
+    monkeypatch.setattr(get_settings(), "app_env", "production")
+    runner.enqueue("sync_account", "job-1")  # returns immediately although the task is blocked
+    assert "thread" not in ran
+    gate.set()
+    assert done.wait(5) and ran["thread"].startswith("inline-task")
+    # elsewhere (tests, development) it stays synchronous so callers see the finished state
+    ran.clear()
+    done.clear()
+    monkeypatch.setattr(get_settings(), "app_env", "test")
+    runner.enqueue("sync_account", "job-2")
+    assert ran["thread"] == threading.current_thread().name
+    # quick tasks (export, send) always run in line, because their endpoints return the result
+    monkeypatch.setattr(get_settings(), "app_env", "production")
+    monkeypatch.setitem(runner._INLINE, "send_delivery", lambda *_a, **_k: ran.__setitem__("send", threading.current_thread().name))
+    runner.enqueue("send_delivery", "d1")
+    assert ran["send"] == threading.current_thread().name
